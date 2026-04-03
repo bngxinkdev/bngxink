@@ -5,7 +5,15 @@ const {
   REST,
   Routes,
   SlashCommandBuilder,
-  ChannelType
+  ChannelType,
+  EmbedBuilder,
+  ActionRowBuilder,
+  ButtonBuilder,
+  ButtonStyle,
+  StringSelectMenuBuilder,
+  ModalBuilder,
+  TextInputBuilder,
+  TextInputStyle
 } = require("discord.js");
 
 const {
@@ -19,7 +27,7 @@ const client = new Client({
   intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildVoiceStates]
 });
 
-// ===== GLOBAL =====
+// ===== STATE =====
 let autoRotate = true;
 let manualActivity = null;
 let manualStatus = "online";
@@ -39,48 +47,42 @@ function format(ms) {
   return `${d}d ${h}h ${m}m ${s}s`;
 }
 
-// ===== JOIN VC =====
+// ===== VOICE =====
 function connectVC(channel) {
-  if (!channel || channel.type !== ChannelType.GuildVoice) return null;
+  if (!channel || channel.type !== ChannelType.GuildVoice) return;
 
   currentVC = channel.id;
 
-  const connection = joinVoiceChannel({
+  const conn = joinVoiceChannel({
     channelId: channel.id,
     guildId: channel.guild.id,
-    adapterCreator: channel.guild.voiceAdapterCreator,
-    selfDeaf: true
+    adapterCreator: channel.guild.voiceAdapterCreator
   });
 
-  // 🔥 AUTO RECONNECT
-  connection.on(VoiceConnectionStatus.Disconnected, async () => {
+  conn.on(VoiceConnectionStatus.Disconnected, async () => {
     try {
       await Promise.race([
-        entersState(connection, VoiceConnectionStatus.Signalling, 5000),
-        entersState(connection, VoiceConnectionStatus.Connecting, 5000)
+        entersState(conn, VoiceConnectionStatus.Signalling, 5000),
+        entersState(conn, VoiceConnectionStatus.Connecting, 5000)
       ]);
     } catch {
-      console.log("🔁 Reconnecting VC...");
+      console.log("🔁 reconnect...");
       connectVC(channel);
     }
   });
-
-  return connection;
 }
 
 // ===== READY =====
 client.once("ready", () => {
   console.log(`✅ ${client.user.tag}`);
 
-  // auto join lại khi restart
   const vc = client.channels.cache.get(currentVC);
   if (vc) connectVC(vc);
 
-  // ===== ACTIVITY =====
   const acts = [
     () => `🚀 ${client.guilds.cache.size} servers`,
     () => `👥 ${client.users.cache.size} users`,
-    () => `🔥 /joinvc để gọi`,
+    () => `🎛️ /custom panel`,
     () => `⏱️ ${format(Date.now() - startTime)}`
   ];
 
@@ -91,18 +93,15 @@ client.once("ready", () => {
       client.user.setActivity(manualActivity);
       return;
     }
-
-    client.user.setActivity(acts[i % acts.length](), { type: 0 });
+    client.user.setActivity(acts[i % acts.length]());
     i++;
   }, 5000);
 
-  // ===== STATUS =====
   setInterval(() => {
     if (!autoRotate) {
       client.user.setStatus(manualStatus);
       return;
     }
-
     const h = new Date().getHours();
     if (h < 6) client.user.setStatus("dnd");
     else if (h < 18) client.user.setStatus("online");
@@ -110,40 +109,25 @@ client.once("ready", () => {
   }, 10000);
 });
 
-// ===== COMMANDS =====
+// ===== COMMAND =====
 const commands = [
-  new SlashCommandBuilder().setName("ping").setDescription("ping bot"),
-
-  new SlashCommandBuilder().setName("uptime").setDescription("uptime"),
+  new SlashCommandBuilder()
+    .setName("custom")
+    .setDescription("panel")
+    .addSubcommand(s =>
+      s.setName("panel").setDescription("open panel")
+    ),
 
   new SlashCommandBuilder()
     .setName("joinvc")
-    .setDescription("join voice")
+    .setDescription("join vc")
     .addStringOption(o =>
-      o.setName("id").setDescription("voice id").setRequired(false)
-    ),
-
-  new SlashCommandBuilder().setName("leavevc").setDescription("leave"),
-
-  new SlashCommandBuilder()
-    .setName("setactivity")
-    .setDescription("manual activity")
-    .addStringOption(o =>
-      o.setName("text").setRequired(true).setDescription("text")
+      o.setName("id").setRequired(false).setDescription("vc id")
     ),
 
   new SlashCommandBuilder()
-    .setName("setstatus")
-    .setDescription("manual status")
-    .addStringOption(o =>
-      o.setName("type")
-        .setRequired(true)
-        .setDescription("online idle dnd")
-    ),
-
-  new SlashCommandBuilder()
-    .setName("autotoggle")
-    .setDescription("toggle auto")
+    .setName("leavevc")
+    .setDescription("leave vc")
 ];
 
 // ===== REGISTER =====
@@ -157,67 +141,124 @@ const rest = new REST({ version: "10" }).setToken(process.env.TOKEN);
     ),
     { body: commands }
   );
-  console.log("✅ Commands loaded");
+  console.log("✅ commands");
 })();
+
+// ===== PANEL UI =====
+function createPanel() {
+  const embed = new EmbedBuilder()
+    .setTitle("🎛️ BOT CONTROL PANEL")
+    .setDescription("Điều khiển bot tại đây")
+    .addFields(
+      { name: "Auto", value: String(autoRotate), inline: true },
+      { name: "Status", value: manualStatus, inline: true },
+      { name: "Uptime", value: format(Date.now() - startTime) }
+    );
+
+  const buttons = new ActionRowBuilder().addComponents(
+    new ButtonBuilder().setCustomId("auto").setLabel("Toggle Auto").setStyle(ButtonStyle.Primary),
+    new ButtonBuilder().setCustomId("online").setLabel("Online").setStyle(ButtonStyle.Success),
+    new ButtonBuilder().setCustomId("idle").setLabel("Idle").setStyle(ButtonStyle.Secondary),
+    new ButtonBuilder().setCustomId("dnd").setLabel("DND").setStyle(ButtonStyle.Danger)
+  );
+
+  const select = new ActionRowBuilder().addComponents(
+    new StringSelectMenuBuilder()
+      .setCustomId("activity_select")
+      .setPlaceholder("Chọn activity")
+      .addOptions([
+        { label: "Serving", value: "serving" },
+        { label: "Users", value: "users" },
+        { label: "Uptime", value: "uptime" },
+        { label: "Custom", value: "custom" }
+      ])
+  );
+
+  return { embed, components: [buttons, select] };
+}
 
 // ===== HANDLE =====
 client.on("interactionCreate", async (i) => {
-  if (!i.isChatInputCommand()) return;
+  if (i.isChatInputCommand()) {
 
-  // ping
-  if (i.commandName === "ping")
-    return i.reply(`🏓 ${client.ws.ping}ms`);
-
-  // uptime
-  if (i.commandName === "uptime")
-    return i.reply(`⏱️ ${format(Date.now() - startTime)}`);
-
-  // joinvc
-  if (i.commandName === "joinvc") {
-    let ch;
-    const id = i.options.getString("id");
-
-    if (id) ch = client.channels.cache.get(id);
-    else ch = i.member.voice.channel;
-
-    if (!ch)
-      return i.reply("❌ vào VC hoặc nhập ID");
-
-    if (ch.type !== ChannelType.GuildVoice)
-      return i.reply("❌ không phải VC");
-
-    connectVC(ch);
-    return i.reply(`🎧 joined ${ch.name}`);
-  }
-
-  // leave
-  if (i.commandName === "leavevc") {
-    const conn = getVoiceConnection(i.guild.id);
-    if (conn) {
-      conn.destroy();
-      return i.reply("👋 left VC");
+    // panel
+    if (i.commandName === "custom") {
+      const { embed, components } = createPanel();
+      return i.reply({ embeds: [embed], components });
     }
-    return i.reply("❌ chưa join");
+
+    // joinvc
+    if (i.commandName === "joinvc") {
+      let ch = i.options.getString("id")
+        ? client.channels.cache.get(i.options.getString("id"))
+        : i.member.voice.channel;
+
+      if (!ch) return i.reply("❌ vào VC");
+
+      connectVC(ch);
+      return i.reply(`🎧 ${ch.name}`);
+    }
+
+    // leave
+    if (i.commandName === "leavevc") {
+      const conn = getVoiceConnection(i.guild.id);
+      if (conn) conn.destroy();
+      return i.reply("👋 done");
+    }
   }
 
-  // activity
-  if (i.commandName === "setactivity") {
-    manualActivity = i.options.getString("text");
+  // ===== BUTTON =====
+  if (i.isButton()) {
+    if (i.customId === "auto") {
+      autoRotate = !autoRotate;
+    }
+
+    if (["online", "idle", "dnd"].includes(i.customId)) {
+      manualStatus = i.customId;
+      autoRotate = false;
+    }
+
+    const { embed, components } = createPanel();
+    return i.update({ embeds: [embed], components });
+  }
+
+  // ===== SELECT =====
+  if (i.isStringSelectMenu()) {
+    const val = i.values[0];
+
+    if (val === "serving") manualActivity = "🚀 Serving servers";
+    if (val === "users") manualActivity = "👥 Watching users";
+    if (val === "uptime") manualActivity = `⏱️ ${format(Date.now() - startTime)}`;
+
+    if (val === "custom") {
+      const modal = new ModalBuilder()
+        .setCustomId("custom_modal")
+        .setTitle("Custom Activity");
+
+      const input = new TextInputBuilder()
+        .setCustomId("text")
+        .setLabel("Nhập activity")
+        .setStyle(TextInputStyle.Short);
+
+      modal.addComponents(new ActionRowBuilder().addComponents(input));
+
+      return i.showModal(modal);
+    }
+
     autoRotate = false;
-    return i.reply(`✅ ${manualActivity}`);
+
+    const { embed, components } = createPanel();
+    return i.update({ embeds: [embed], components });
   }
 
-  // status
-  if (i.commandName === "setstatus") {
-    manualStatus = i.options.getString("type");
-    autoRotate = false;
-    return i.reply(`✅ ${manualStatus}`);
-  }
+  // ===== MODAL =====
+  if (i.isModalSubmit()) {
+    if (i.customId === "custom_modal") {
+      manualActivity = i.fields.getTextInputValue("text");
+      autoRotate = false;
 
-  // auto
-  if (i.commandName === "autotoggle") {
-    autoRotate = !autoRotate;
-    return i.reply(`🔁 auto: ${autoRotate}`);
+      return i.reply(`✅ ${manualActivity}`);
+    }
   }
 });
 
