@@ -32,11 +32,23 @@ let autoRotate = true;
 let manualActivity = null;
 let manualStatus = "online";
 let currentVC = process.env.VOICE_CHANNEL_ID;
+let activityList = [
+  "🚀 Serving servers",
+  "👥 Watching users",
+  "🎛️ /custom panel"
+];
+
+let index = 0;
 const startTime = Date.now();
 
 // ===== ANTI CRASH =====
 process.on("unhandledRejection", console.error);
 process.on("uncaughtException", console.error);
+
+// ===== CHECK ROLE =====
+function hasPermission(member) {
+  return member.roles.cache.has(process.env.ROLE_ID);
+}
 
 // ===== UPTIME =====
 function format(ms) {
@@ -66,7 +78,6 @@ function connectVC(channel) {
         entersState(conn, VoiceConnectionStatus.Connecting, 5000)
       ]);
     } catch {
-      console.log("🔁 reconnect...");
       connectVC(channel);
     }
   });
@@ -79,22 +90,14 @@ client.once("ready", () => {
   const vc = client.channels.cache.get(currentVC);
   if (vc) connectVC(vc);
 
-  const acts = [
-    () => `🚀 ${client.guilds.cache.size} servers`,
-    () => `👥 ${client.users.cache.size} users`,
-    () => `🎛️ /custom panel`,
-    () => `⏱️ ${format(Date.now() - startTime)}`
-  ];
-
-  let i = 0;
-
   setInterval(() => {
     if (!autoRotate && manualActivity) {
       client.user.setActivity(manualActivity);
       return;
     }
-    client.user.setActivity(acts[i % acts.length]());
-    i++;
+
+    client.user.setActivity(activityList[index % activityList.length]);
+    index++;
   }, 5000);
 
   setInterval(() => {
@@ -102,6 +105,7 @@ client.once("ready", () => {
       client.user.setStatus(manualStatus);
       return;
     }
+
     const h = new Date().getHours();
     if (h < 6) client.user.setStatus("dnd");
     else if (h < 18) client.user.setStatus("online");
@@ -114,9 +118,7 @@ const commands = [
   new SlashCommandBuilder()
     .setName("custom")
     .setDescription("panel")
-    .addSubcommand(s =>
-      s.setName("panel").setDescription("open panel")
-    ),
+    .addSubcommand(s => s.setName("panel").setDescription("open panel")),
 
   new SlashCommandBuilder()
     .setName("joinvc")
@@ -141,65 +143,51 @@ const rest = new REST({ version: "10" }).setToken(process.env.TOKEN);
     ),
     { body: commands }
   );
-  console.log("✅ commands");
 })();
 
-// ===== PANEL UI =====
-function createPanel() {
+// ===== PANEL =====
+function panel() {
   const embed = new EmbedBuilder()
-    .setTitle("🎛️ BOT CONTROL PANEL")
-    .setDescription("Điều khiển bot tại đây")
+    .setTitle("🎛️ CONTROL PANEL")
     .addFields(
       { name: "Auto", value: String(autoRotate), inline: true },
       { name: "Status", value: manualStatus, inline: true },
-      { name: "Uptime", value: format(Date.now() - startTime) }
+      { name: "List", value: activityList.join("\n") }
     );
 
   const buttons = new ActionRowBuilder().addComponents(
     new ButtonBuilder().setCustomId("auto").setLabel("Toggle Auto").setStyle(ButtonStyle.Primary),
-    new ButtonBuilder().setCustomId("online").setLabel("Online").setStyle(ButtonStyle.Success),
-    new ButtonBuilder().setCustomId("idle").setLabel("Idle").setStyle(ButtonStyle.Secondary),
-    new ButtonBuilder().setCustomId("dnd").setLabel("DND").setStyle(ButtonStyle.Danger)
+    new ButtonBuilder().setCustomId("setlist").setLabel("Set List").setStyle(ButtonStyle.Secondary),
+    new ButtonBuilder().setCustomId("setstatus").setLabel("Set Status").setStyle(ButtonStyle.Success)
   );
 
-  const select = new ActionRowBuilder().addComponents(
-    new StringSelectMenuBuilder()
-      .setCustomId("activity_select")
-      .setPlaceholder("Chọn activity")
-      .addOptions([
-        { label: "Serving", value: "serving" },
-        { label: "Users", value: "users" },
-        { label: "Uptime", value: "uptime" },
-        { label: "Custom", value: "custom" }
-      ])
-  );
-
-  return { embed, components: [buttons, select] };
+  return { embed, components: [buttons] };
 }
 
 // ===== HANDLE =====
 client.on("interactionCreate", async (i) => {
+
+  // ===== SLASH =====
   if (i.isChatInputCommand()) {
 
-    // panel
     if (i.commandName === "custom") {
-      const { embed, components } = createPanel();
+      if (!hasPermission(i.member))
+        return i.reply({ content: "❌ không có quyền", ephemeral: true });
+
+      const { embed, components } = panel();
       return i.reply({ embeds: [embed], components });
     }
 
-    // joinvc
     if (i.commandName === "joinvc") {
       let ch = i.options.getString("id")
         ? client.channels.cache.get(i.options.getString("id"))
         : i.member.voice.channel;
 
       if (!ch) return i.reply("❌ vào VC");
-
       connectVC(ch);
       return i.reply(`🎧 ${ch.name}`);
     }
 
-    // leave
     if (i.commandName === "leavevc") {
       const conn = getVoiceConnection(i.guild.id);
       if (conn) conn.destroy();
@@ -209,55 +197,51 @@ client.on("interactionCreate", async (i) => {
 
   // ===== BUTTON =====
   if (i.isButton()) {
+
+    if (!hasPermission(i.member))
+      return i.reply({ content: "❌ không có quyền", ephemeral: true });
+
     if (i.customId === "auto") {
       autoRotate = !autoRotate;
     }
 
-    if (["online", "idle", "dnd"].includes(i.customId)) {
-      manualStatus = i.customId;
-      autoRotate = false;
-    }
-
-    const { embed, components } = createPanel();
-    return i.update({ embeds: [embed], components });
-  }
-
-  // ===== SELECT =====
-  if (i.isStringSelectMenu()) {
-    const val = i.values[0];
-
-    if (val === "serving") manualActivity = "🚀 Serving servers";
-    if (val === "users") manualActivity = "👥 Watching users";
-    if (val === "uptime") manualActivity = `⏱️ ${format(Date.now() - startTime)}`;
-
-    if (val === "custom") {
+    if (i.customId === "setlist") {
       const modal = new ModalBuilder()
-        .setCustomId("custom_modal")
-        .setTitle("Custom Activity");
+        .setCustomId("list_modal")
+        .setTitle("Set Activity List");
 
       const input = new TextInputBuilder()
-        .setCustomId("text")
-        .setLabel("Nhập activity")
-        .setStyle(TextInputStyle.Short);
+        .setCustomId("list")
+        .setLabel("Mỗi dòng 1 activity")
+        .setStyle(TextInputStyle.Paragraph);
 
       modal.addComponents(new ActionRowBuilder().addComponents(input));
-
       return i.showModal(modal);
     }
 
-    autoRotate = false;
+    if (i.customId === "setstatus") {
+      manualStatus = "online";
+      autoRotate = false;
+    }
 
-    const { embed, components } = createPanel();
+    const { embed, components } = panel();
     return i.update({ embeds: [embed], components });
   }
 
   // ===== MODAL =====
   if (i.isModalSubmit()) {
-    if (i.customId === "custom_modal") {
-      manualActivity = i.fields.getTextInputValue("text");
-      autoRotate = false;
 
-      return i.reply(`✅ ${manualActivity}`);
+    if (!hasPermission(i.member))
+      return i.reply({ content: "❌ không có quyền", ephemeral: true });
+
+    if (i.customId === "list_modal") {
+      const text = i.fields.getTextInputValue("list");
+
+      activityList = text.split("\n").filter(x => x.trim() !== "");
+      index = 0;
+      autoRotate = true;
+
+      return i.reply("✅ updated list");
     }
   }
 });
