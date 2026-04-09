@@ -1,12 +1,23 @@
-require("dotenv").config();
-const { Client, GatewayIntentBits, ActivityType, EmbedBuilder, ButtonBuilder, ButtonStyle, ActionRowBuilder } = require("discord.js");
-const { joinVoiceChannel } = require("@discordjs/voice");
-const { read, write } = require("./utils");
+require('dotenv').config();
 
-console.log("🚀 Bot starting...");
+const {
+  Client,
+  GatewayIntentBits,
+  ActivityType,
+  REST,
+  Routes,
+  SlashCommandBuilder,
+  EmbedBuilder,
+  ActionRowBuilder,
+  ButtonBuilder,
+  ButtonStyle,
+  PermissionFlagsBits
+} = require('discord.js');
 
-process.on("unhandledRejection", console.error);
-process.on("uncaughtException", console.error);
+const {
+  joinVoiceChannel,
+  getVoiceConnection
+} = require('@discordjs/voice');
 
 const client = new Client({
   intents: [
@@ -16,139 +27,204 @@ const client = new Client({
 });
 
 let startTime = Date.now();
-let vcConnection = null;
+let voiceConfig = {};
+let panelRole = null;
 
-// ================== READY ==================
-client.once("ready", () => {
-  console.log(`✅ Logged in as ${client.user.tag}`);
+// ===== PRESENCE SYSTEM =====
+let presenceList = [
+  "🚀 bngxink bot online",
+  "🎧 24/7 voice",
+  "⚡ /panel để điều khiển",
+];
 
-  startPresenceLoop();
-  autoReconnectVC();
-});
+let presenceIndex = 0;
+let autoPresence = true;
+let currentStatus = 'online';
 
-// ================== PRESENCE ==================
-function startPresenceLoop() {
-  let config = read("config.json");
+// ===== AUTO ROTATE PRESENCE =====
+setInterval(() => {
+  if (!autoPresence) return;
 
-  if (!config.autoPresence) return;
+  if (presenceList.length === 0) return;
 
-  const list = read("presence.json");
-  let i = 0;
-
-  setInterval(() => {
-    const p = list[i % list.length];
-    client.user.setActivity(p.text, {
-      type: ActivityType[p.type.toUpperCase()]
-    });
-    i++;
-  }, 10000);
-}
-
-// ================== VC ==================
-function joinVC(guildId, channelId) {
-  vcConnection = joinVoiceChannel({
-    channelId,
-    guildId,
-    adapterCreator: client.guilds.cache.get(guildId).voiceAdapterCreator
+  client.user.setPresence({
+    activities: [{
+      name: presenceList[presenceIndex],
+      type: ActivityType.Playing
+    }],
+    status: currentStatus
   });
 
-  let data = read("voice.json");
-  data.guildId = guildId;
-  data.channelId = channelId;
-  write("voice.json", data);
+  presenceIndex++;
+  if (presenceIndex >= presenceList.length) presenceIndex = 0;
+
+}, 15000);
+
+// ===== AUTO RECONNECT VC =====
+async function connectVC(guild) {
+  const config = voiceConfig[guild.id];
+  if (!config) return;
+
+  try {
+    joinVoiceChannel({
+      channelId: config.channelId,
+      guildId: guild.id,
+      adapterCreator: guild.voiceAdapterCreator,
+      selfDeaf: true
+    });
+  } catch (e) {
+    console.log("VC reconnect error:", e.message);
+  }
 }
 
-function autoReconnectVC() {
-  const data = read("voice.json");
-  if (!data.channelId) return;
+// ===== READY =====
+client.once('ready', async () => {
+  console.log(`✅ Logged in as ${client.user.tag}`);
 
-  setTimeout(() => {
-    try {
-      joinVC(data.guildId, data.channelId);
-      console.log("🔁 Reconnected VC");
-    } catch {}
-  }, 5000);
-}
+  const commands = [
+    new SlashCommandBuilder()
+      .setName('panel')
+      .setDescription('Control bot'),
 
-// ================== PERMISSION ==================
-function checkRole(member) {
-  const config = read("config.json");
-  if (!config.role) return true;
-  return member.roles.cache.has(config.role);
-}
+    new SlashCommandBuilder()
+      .setName('joinvc')
+      .setDescription('Join voice')
+      .addChannelOption(o =>
+        o.setName('channel')
+          .setDescription('Voice channel')
+          .setRequired(false)
+      ),
 
-// ================== COMMAND ==================
-client.on("interactionCreate", async (i) => {
+    new SlashCommandBuilder()
+      .setName('leavevc')
+      .setDescription('Leave voice'),
+
+    new SlashCommandBuilder()
+      .setName('permission')
+      .setDescription('Set role dùng panel')
+      .addRoleOption(o =>
+        o.setName('role')
+          .setDescription('Role')
+          .setRequired(true)
+      )
+  ];
+
+  const rest = new REST({ version: '10' }).setToken(process.env.TOKEN);
+
+  await rest.put(
+    Routes.applicationCommands(client.user.id),
+    { body: commands }
+  );
+
+  console.log("✅ Slash commands loaded");
+});
+
+// ===== INTERACTION =====
+client.on('interactionCreate', async (i) => {
   if (!i.isChatInputCommand() && !i.isButton()) return;
 
+  // ===== SLASH =====
   if (i.isChatInputCommand()) {
 
-    if (i.commandName === "permission") {
-      const role = i.options.getRole("role");
-
-      let config = read("config.json");
-      config.role = role.id;
-      write("config.json", config);
-
-      return i.reply({ content: "✅ role set", ephemeral: true });
+    if (i.commandName === 'permission') {
+      panelRole = i.options.getRole('role');
+      return i.reply({ content: `✅ Role set: ${panelRole.name}`, ephemeral: true });
     }
 
-    if (i.commandName === "joinvc") {
-      const vc = i.member.voice.channel;
-      if (!vc) return i.reply({ content: "❌ vào VC đi", ephemeral: true });
+    if (i.commandName === 'joinvc') {
+      const vc = i.options.getChannel('channel') || i.member.voice.channel;
+      if (!vc) return i.reply({ content: '❌ Vào voice trước', ephemeral: true });
 
-      joinVC(i.guild.id, vc.id);
-      return i.reply("✅ joined");
+      voiceConfig[i.guild.id] = {
+        channelId: vc.id
+      };
+
+      connectVC(i.guild);
+
+      return i.reply("✅ Joined VC");
     }
 
-    if (i.commandName === "leavevc") {
-      vcConnection?.destroy();
-      return i.reply("👋 left");
+    if (i.commandName === 'leavevc') {
+      const conn = getVoiceConnection(i.guild.id);
+      if (conn) conn.destroy();
+      delete voiceConfig[i.guild.id];
+      return i.reply("👋 Left VC");
     }
 
-    if (i.commandName === "custom") {
+    if (i.commandName === 'panel') {
 
-      if (!checkRole(i.member)) {
-        return i.reply({ content: "❌ no perm", ephemeral: true });
+      if (panelRole && !i.member.roles.cache.has(panelRole.id)) {
+        return i.reply({ content: '❌ Không có quyền', ephemeral: true });
       }
 
       const embed = new EmbedBuilder()
-        .setTitle("⚙️ Control Panel")
-        .setDescription("choose action")
+        .setTitle("🎛 CONTROL PANEL")
+        .setDescription("Điều khiển bot tại đây")
         .addFields(
-          { name: "Uptime", value: `${Math.floor((Date.now() - startTime) / 1000)}s` }
+          { name: "Status", value: currentStatus, inline: true },
+          { name: "Auto Presence", value: autoPresence ? "ON" : "OFF", inline: true }
         );
 
       const row = new ActionRowBuilder().addComponents(
-        new ButtonBuilder().setCustomId("status").setLabel("Toggle Status").setStyle(ButtonStyle.Primary),
-        new ButtonBuilder().setCustomId("presence").setLabel("Toggle Presence").setStyle(ButtonStyle.Secondary)
+        new ButtonBuilder().setCustomId('status_online').setLabel('Online').setStyle(ButtonStyle.Success),
+        new ButtonBuilder().setCustomId('status_idle').setLabel('Idle').setStyle(ButtonStyle.Secondary),
+        new ButtonBuilder().setCustomId('status_dnd').setLabel('DND').setStyle(ButtonStyle.Danger),
       );
 
-      return i.reply({ embeds: [embed], components: [row] });
+      const row2 = new ActionRowBuilder().addComponents(
+        new ButtonBuilder().setCustomId('toggle_presence').setLabel('Toggle Auto Presence').setStyle(ButtonStyle.Primary),
+        new ButtonBuilder().setCustomId('add_presence').setLabel('Add Presence').setStyle(ButtonStyle.Success),
+        new ButtonBuilder().setCustomId('clear_presence').setLabel('Clear List').setStyle(ButtonStyle.Danger),
+      );
+
+      return i.reply({ embeds: [embed], components: [row, row2] });
     }
   }
 
-  // ================== BUTTON ==================
+  // ===== BUTTON =====
   if (i.isButton()) {
-    let config = read("config.json");
 
-    if (i.customId === "status") {
-      config.status = config.status === "online" ? "dnd" : "online";
-      client.user.setStatus(config.status);
-      write("config.json", config);
-
-      return i.reply({ content: `status: ${config.status}`, ephemeral: true });
+    if (panelRole && !i.member.roles.cache.has(panelRole.id)) {
+      return i.reply({ content: '❌ Không có quyền', ephemeral: true });
     }
 
-    if (i.customId === "presence") {
-      config.autoPresence = !config.autoPresence;
-      write("config.json", config);
+    if (i.customId.startsWith('status_')) {
+      currentStatus = i.customId.replace('status_', '');
+      return i.reply({ content: `✅ Status: ${currentStatus}`, ephemeral: true });
+    }
 
-      return i.reply({ content: `autoPresence: ${config.autoPresence}`, ephemeral: true });
+    if (i.customId === 'toggle_presence') {
+      autoPresence = !autoPresence;
+      return i.reply({ content: `⚡ Auto Presence: ${autoPresence}`, ephemeral: true });
+    }
+
+    if (i.customId === 'add_presence') {
+      presenceList.push(`✨ Custom ${Date.now()}`);
+      return i.reply({ content: '➕ Added presence', ephemeral: true });
+    }
+
+    if (i.customId === 'clear_presence') {
+      presenceList = [];
+      return i.reply({ content: '🗑 Cleared list', ephemeral: true });
     }
   }
 });
 
-// ================== LOGIN ==================
-console.log("🔑 Logging into Discord...");
+// ===== AUTO RECONNECT LOOP =====
+setInterval(() => {
+  for (const guildId in voiceConfig) {
+    const guild = client.guilds.cache.get(guildId);
+    if (!guild) continue;
+
+    const conn = getVoiceConnection(guildId);
+    if (!conn) {
+      connectVC(guild);
+    }
+  }
+}, 20000);
+
+// ===== ANTI CRASH =====
+process.on('unhandledRejection', console.error);
+process.on('uncaughtException', console.error);
+
 client.login(process.env.TOKEN);
